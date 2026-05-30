@@ -10,9 +10,7 @@ import threading
 import math
 import ctypes
 
-# ==========================================
 # 1. KELAS MULTI-THREADING UNTUK KAMERA
-# ==========================================
 class WebcamStream:
     def __init__(self, src=0):
         self.cap = cv2.VideoCapture(src)
@@ -34,9 +32,7 @@ class WebcamStream:
         self.stopped = True
         self.cap.release()
 
-# ==========================================
 # 2. FUNGSI LIVENESS DETECTION
-# ==========================================
 def hitung_jarak(p1, p2):
     return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
@@ -50,9 +46,7 @@ def eye_aspect_ratio(eye):
 EAR_THRESHOLD = 0.22
 mata_tertutup_sebelumnya = False
 
-# ==========================================
 # 3. KONFIGURASI DAN MEMORI SISTEM
-# ==========================================
 DATASET_DIR = "dataset_wajah"
 if not os.path.exists(DATASET_DIR):
     os.makedirs(DATASET_DIR)
@@ -60,7 +54,6 @@ if not os.path.exists(DATASET_DIR):
 known_face_encodings = []
 known_face_names = []
 
-# PERUBAHAN: Sekarang menggunakan Dictionary untuk menyimpan Nama dan Jam Absen
 wajah_sudah_absen = {} 
 tanggal_terakhir_absen = datetime.now().date()
 
@@ -85,7 +78,6 @@ def load_registered_faces():
                 known_face_encodings.append(encodings[0])
                 known_face_names.append(name)
 
-# FITUR BARU: Membaca CSV saat program pertama kali dibuka
 def muat_absensi_hari_ini():
     global wajah_sudah_absen
     wajah_sudah_absen = {}
@@ -106,7 +98,6 @@ def muat_absensi_hari_ini():
 load_registered_faces()
 muat_absensi_hari_ini() # Panggil fungsi pemulihan memori
 
-# PERUBAHAN: Fungsi ini sekarang mengembalikan 'jam' agar bisa disimpan di memori
 def catat_kehadiran(nama):
     file_csv = 'Laporan_Presensi.csv'
     file_exists = os.path.isfile(file_csv)
@@ -131,9 +122,7 @@ def register_new_face(frame):
         load_registered_faces()
         messagebox.showinfo("Sukses", f"Wajah {new_name} berhasil didaftarkan!")
 
-# ==========================================
 # 4. LOOP UTAMA PROGRAM
-# ==========================================
 print("Kamera aktif. Sistem presensi berjalan...")
 vs = WebcamStream(src=0).start()
 
