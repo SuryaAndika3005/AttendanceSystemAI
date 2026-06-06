@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vision | Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <style>
+        /* TEMA GELAP BERSIH */
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Plus Jakarta Sans', sans-serif; overflow-x: hidden; }
+        
+        .sidebar { height: 100vh; width: 260px; position: fixed; top: 0; left: 0; background: rgba(30, 41, 59, 0.95); border-right: 1px solid rgba(255, 255, 255, 0.1); padding-top: 30px; z-index: 1000; }
+        .sidebar-brand { font-weight: 800; font-size: 1.5rem; color: #10b981; text-align: center; margin-bottom: 40px; letter-spacing: 1px; }
+        .nav-link { color: #cbd5e1; padding: 15px 25px; font-weight: 600; transition: all 0.3s ease; border-left: 4px solid transparent; }
+        .nav-link:hover, .nav-link.active { color: #10b981; background: rgba(16, 185, 129, 0.1); border-left-color: #10b981; }
+        .nav-link i { margin-right: 10px; font-size: 1.2rem; }
+        .main-content { margin-left: 260px; padding: 40px; }
+        
+        /* WARNA TEKS DIBUAT TERANG */
+        .text-light-custom { color: #cbd5e1 !important; }
+        .text-white-custom { color: #f8fafc !important; }
+
+        /* KARTU METRIK */
+        .glass-card { background: rgba(30, 41, 59, 0.5); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 25px; transition: transform 0.3s ease; }
+        .glass-card:hover { transform: translateY(-5px); box-shadow: 0 10px 25px rgba(16, 185, 129, 0.15); }
+        .metric-title { font-size: 0.9rem; color: #cbd5e1; text-transform: uppercase; letter-spacing: 1px; }
+        .metric-value { font-size: 2.5rem; font-weight: 800; margin-top: 10px; }
+        
+        /* TABEL TERANG DI TEMA GELAP */
+        .table-container { background: rgba(30, 41, 59, 0.5); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); padding: 25px; margin-top: 30px; }
+        .table { color: #f8fafc !important; margin-bottom: 0; }
+        .table thead th { background: transparent; color: #cbd5e1; border-bottom: 2px solid rgba(255, 255, 255, 0.1); font-weight: 600; }
+        .table tbody td { border-bottom: 1px solid rgba(255, 255, 255, 0.05); padding: 15px 10px; vertical-align: middle; color: #f8fafc;}
+        
+        /* ANIMASI LIVE SCANNER (DENYUT MERAH) */
+        .live-badge { animation: pulse-red 1.5s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        
+        .badge.bg-success { background-color: rgba(16, 185, 129, 0.2) !important; color: #10b981 !important; border: 1px solid #10b981; }
+        .badge.bg-danger { background-color: rgba(239, 68, 68, 0.2) !important; color: #ef4444 !important; border: 1px solid #ef4444; }
+        
+        /* TOMBOL */
+        .btn-custom { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 600; transition: all 0.3s ease; }
+        .btn-custom:hover { transform: scale(1.05); color: white; box-shadow: 0 6px 20px rgba(16, 185, 129, 0.5); }
+        .btn-custom-outline { border: 1px solid #10b981; color: #10b981; border-radius: 8px; padding: 10px 20px; font-weight: 600; background: transparent; transition: all 0.3s ease;}
+        .btn-custom-outline:hover { background: rgba(16, 185, 129, 0.1); color: #10b981; transform: scale(1.05);}
+        
+        /* MODAL (HURUF PUTIH) */
+        .modal-content { background-color: #1e293b; border: 1px solid rgba(255,255,255,0.1); color: #f8fafc; border-radius: 16px; }
+        .modal-header { border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .modal-footer { border-top: 1px solid rgba(255,255,255,0.1); }
+        .form-control { background-color: #0f172a; border: 1px solid rgba(255,255,255,0.2); color: #f8fafc; border-radius: 8px; padding: 12px; }
+        .form-control:focus { background-color: #0f172a; color: #f8fafc; border-color: #10b981; box-shadow: 0 0 0 0.25rem rgba(16, 185, 129, 0.25); }
+        .form-control::placeholder { color: #94a3b8; }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="sidebar-brand"><i class="bi bi-cpu"></i> Vision AI</div>
+        <ul class="nav flex-column mt-4">
+            <li class="nav-item">
+                <a class="nav-link active" href="/"><i class="bi bi-grid-1x2-fill"></i> Dashboard</a>
+            </li>
+            <li class="nav-item my-2 px-3">
+                <a class="btn btn-outline-danger w-100 text-start fw-bold live-badge" href="/scanner" style="border-radius: 10px;">
+                    <i class="bi bi-camera-video-fill me-2"></i> Buka Live Scanner 🔴
+                </a>
+            </li>
+            <li class="nav-item mt-4 px-4">
+                <button class="btn btn-custom w-100 mb-2" data-bs-toggle="modal" data-bs-target="#registerModal">
+                    <i class="bi bi-person-plus-fill"></i> Tambah Wajah
+                </button>
+                <button class="btn btn-custom-outline w-100" data-bs-toggle="modal" data-bs-target="#manageModal">
+                    <i class="bi bi-person-lines-fill"></i> Kelola Wajah
+                </button>
+            </li>
+        </ul>
+    </div>
+
+    <div class="main-content">
+        <div class="d-flex justify-content-between align-items-center mb-5">
+            <div>
+                <h2 class="fw-bold mb-1 text-white-custom">Overview Analytics</h2>
+                <p class="text-light-custom mb-0">Pemantauan presensi real-time berbasis Liveness Detection.</p>
+            </div>
+            <div class="text-end">
+                <h5 class="mb-0 text-white-custom" id="liveClock">00:00:00</h5>
+                <small class="text-light-custom" id="liveDate">Tanggal</small>
+            </div>
+        </div>
+
+        <div class="row g-4">
+            <div class="col-md-4">
+                <div class="glass-card">
+                    <div class="metric-title"><i class="bi bi-people-fill text-info"></i> Total Kehadiran</div>
+                    <div class="metric-value text-info">{{ hadir }} <span style="font-size: 1rem;" class="text-light-custom">Orang</span></div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="glass-card">
+                    <div class="metric-title"><i class="bi bi-check-circle-fill text-success"></i> Tepat Waktu</div>
+                    <div class="metric-value text-success">{{ tepat }} <span style="font-size: 1rem;" class="text-light-custom">Orang</span></div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="glass-card">
+                    <div class="metric-title"><i class="bi bi-exclamation-triangle-fill text-danger"></i> Terlambat</div>
+                    <div class="metric-value text-danger">{{ telat }} <span style="font-size: 1rem;" class="text-light-custom">Orang</span></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-container shadow-lg">
+            <h5 class="fw-bold mb-4 text-white-custom">📋 Log Aktivitas Terkini</h5>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Nama Entitas</th>
+                            <th>Tanggal</th>
+                            <th>Waktu (Clock In)</th>
+                            <th>Status Kehadiran</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in data %}
+                        <tr>
+                            <td class="fw-bold text-white-custom"><i class="bi bi-person-badge me-2 text-light-custom"></i> {{ row[0] }}</td>
+                            <td class="text-white-custom">{{ row[1] }}</td>
+                            <td class="text-white-custom"><i class="bi bi-clock me-1 text-light-custom"></i> {{ row[2] }}</td>
+                            <td>
+                                {% if row[3] == 'Tepat Waktu' %}
+                                <span class="badge bg-success rounded-pill px-3">Tepat Waktu</span>
+                                {% else %}
+                                <span class="badge bg-danger rounded-pill px-3">Terlambat</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not data %}
+                        <tr><td colspan="4" class="text-center py-4 text-light-custom">Belum ada data presensi hari ini.</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="registerModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content shadow-lg">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold"><i class="bi bi-camera me-2"></i> Pendaftaran Wajah Baru</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body p-4 text-center">
+                    <input type="text" id="newUserName" class="form-control form-control-lg text-center mb-3 text-white-custom" placeholder="Masukkan Nama Anda">
+                    <img id="camPreview" src="{{ url_for('video_feed') }}" class="img-fluid rounded border border-secondary mb-3" style="max-height: 200px; object-fit: cover; width: 100%;">
+                </div>
+                <div class="modal-footer justify-content-center">
+                    <button type="button" class="btn btn-outline-secondary px-4 text-white-custom" data-bs-dismiss="modal">Batal</button>
+                    <button type="button" class="btn btn-custom px-4" onclick="registerFace()">📸 Ambil Foto & Simpan</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+// Kamera on/off di modal untuk menghemat data
+        const registerModal = document.getElementById('registerModal');
+        const camPreview = document.getElementById('camPreview');
+        
+        registerModal.addEventListener('hide.bs.modal', event => {
+            camPreview.src = "";
+        });
+        
+        registerModal.addEventListener('show.bs.modal', event => {
+            // Gunakan rute tunggal video_feed yang sudah bebas error
+            camPreview.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+        });
+
+        function registerFace() {
+            const nameInput = document.getElementById('newUserName').value.trim();
+            if (!nameInput) { alert("Silakan masukkan nama terlebih dahulu!"); return; }
+            
+            const formData = new FormData();
+            formData.append('name', nameInput);
+            
+            fetch('/register_face', { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(data => {
+                alert(data.message);
+                if(data.status === 'success') location.reload();
+            }).catch(err => console.error('Error:', err));
+        }
+
+        function deleteFace(name) {
+            if(!confirm("Yakin ingin menghapus wajah " + name + " permanen dari database?")) return;
+            
+            const formData = new FormData();
+            formData.append('name', name);
+            
+            fetch('/delete_face', { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(data => {
+                alert(data.message);
+                if(data.status === 'success') location.reload();
+            }).catch(err => console.error('Error:', err));
+        }
+    </script>
+</body>
+</html>
