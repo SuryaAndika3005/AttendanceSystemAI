@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision AI | Beranda</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background: linear-gradient(135deg, #f0fdf4 0%, #e0e7ff 100%); min-height: 100vh; display: flex; flex-direction: column; }
+        .navbar { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+        .hero-section { flex: 1; display: flex; align-items: center; justify-content: center; padding: 4rem 0; }
+        .hero-card { background: white; border-radius: 24px; padding: 3rem; box-shadow: 0 20px 40px rgba(0,0,0,0.08); transform: translateY(0); transition: all 0.4s ease; }
+        .hero-card:hover { transform: translateY(-5px); box-shadow: 0 25px 50px rgba(79, 70, 229, 0.15); }
+        .btn-primary-custom { background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%); border: none; padding: 12px 28px; border-radius: 12px; font-weight: 600; color: white; transition: all 0.3s; }
+        .btn-primary-custom:hover { transform: scale(1.05); color: white; box-shadow: 0 10px 20px rgba(79, 70, 229, 0.3); }
+        .btn-secondary-custom { background: white; border: 2px solid #4f46e5; color: #4f46e5; padding: 10px 28px; border-radius: 12px; font-weight: 600; transition: all 0.3s; }
+        .btn-secondary-custom:hover { background: #f5f3ff; color: #4338ca; transform: scale(1.05); }
+        .icon-circle { width: 80px; height: 80px; background: #e0e7ff; color: #4f46e5; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2.5rem; margin: 0 auto 1.5rem; }
+    </style>
+</head>
+<body>
+    <nav class="navbar py-3 sticky-top">
+        <div class="container">
+            <a class="navbar-brand fw-bold text-primary" href="/"><i class="bi bi-cpu"></i> Vision AI</a>
+        </div>
+    </nav>
+
+    <div class="hero-section container text-center">
+        <div class="row justify-content-center w-100">
+            <div class="col-lg-8">
+                <div class="hero-card">
+                    <div class="icon-circle"><i class="bi bi-fingerprint"></i></div>
+                    <h1 class="fw-bold mb-3" style="color: #1e293b;">Sistem Presensi Cerdas Terintegrasi AI</h1>
+                    <p class="text-muted mb-4 fs-5">Otomatisasi pencatatan kehadiran menggunakan <i>Face Recognition</i> dan <i>Liveness Detection</i> untuk mencegah kecurangan. Cepat, aman, dan tanpa sentuhan.</p>
+                    <div class="d-flex justify-content-center gap-3 mt-4">
+                        <a href="/scanner" class="btn btn-primary-custom text-decoration-none"><i class="bi bi-camera-video me-2"></i> Buka Halaman Prediksi</a>
+                        <a href="/dashboard" class="btn btn-secondary-custom text-decoration-none"><i class="bi bi-bar-chart-fill me-2"></i> Lihat Halaman Hasil</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
