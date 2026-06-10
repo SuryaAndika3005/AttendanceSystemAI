@@ -1,3 +1,3 @@
-/Laporan_Presensi.csv
-/dataset_wajah
-/
+__pycache__/
+*.db
+dataset_wajah/

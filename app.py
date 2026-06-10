@@ -15,6 +15,7 @@ import queue
 import csv
 from io import StringIO
 import random
+import platform
 import json
 
 app = Flask(__name__)
@@ -231,9 +232,16 @@ def camera_worker():
     global registration_request, registration_response
     global total_scans, total_confidence, total_inference_time
     
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    if platform.system() == 'Windows':
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(0)
+    
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    else:
+        print("PERINGATAN: Tidak ada kamera fisik terdeteksi (Mode Cloud Berjalan).")
     
     frame_counter = 0
     cached_face_locations, cached_colors, cached_display_texts, cached_metrics = [], [], [], []
@@ -403,7 +411,17 @@ def generate_web_stream():
         frame_copy = None
         with frame_lock:
             if output_frame is not None: frame_copy = output_frame.copy()
-        if frame_copy is None: time.sleep(0.05); continue
+            
+        if frame_copy is None: 
+            # Jika tidak ada kamera, buat gambar hitam berisi teks informasi
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, "MODE CLOUD SERVER", (150, 220), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(blank, "(Kamera hanya aktif di perangkat lokal)", (80, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+            ret, buffer = cv2.imencode('.jpg', blank)
+            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(1) # Refresh lambat agar server cloud tidak berat
+            continue
+            
         ret, buffer = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ret: continue
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
