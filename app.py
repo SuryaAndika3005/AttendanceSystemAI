@@ -15,7 +15,7 @@ import csv
 from io import StringIO
 from flask import make_response
 import random
-import json  # WAJIB UNTUK KONVERSI ARRAY KE TEKS DATABASE
+import json
 
 app = Flask(__name__)
 app.secret_key = 'vision_ai_kunci_rahasia_super_aman' 
@@ -32,8 +32,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # OPTIMASI SKALABILITAS: Tambahkan kolom 'encoding TEXT' untuk menyimpan otak AI
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT UNIQUE, waktu_daftar DATETIME DEFAULT CURRENT_TIMESTAMP, encoding TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT, tanggal TEXT, waktu TEXT, status TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password TEXT)''')
@@ -46,14 +44,10 @@ def init_db():
 
 init_db()
 
-# ==========================================
-# DEKORATOR KEAMANAN
-# ==========================================
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
-            return redirect(url_for('login'))
+        if 'logged_in' not in session: return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -66,17 +60,15 @@ tanggal_terakhir_absen = datetime.now().date()
 
 FACE_MATCH_TOLERANCE = 0.40
 EAR_THRESHOLD = 0.20 
-MAR_THRESHOLD = 0.35 
+MAR_THRESHOLD = 0.45 # DIPERKETAT: Harus buka mulut lebih lebar
 
 output_frame = None          
-raw_frame_for_register = None 
 frame_lock = threading.Lock() 
-ai_lock = threading.Lock() 
 latest_scan_event = {}
 
-# ==========================================
-# DEDICATED AUDIO WORKER
-# ==========================================
+registration_request = None
+registration_response = None
+
 audio_queue = queue.Queue()
 
 def audio_worker():
@@ -99,37 +91,27 @@ def audio_worker():
     except: pass
 
 threading.Thread(target=audio_worker, daemon=True).start()
-
-def ucapkan_pesan(teks):
-    audio_queue.put(teks)
+def ucapkan_pesan(teks): audio_queue.put(teks)
 
 # ==========================================
 # FUNGSI LIVENESS DETECTION & UTILITAS
 # ==========================================
 def load_registered_faces():
-    """ 
-    OPTIMASI SKALABILITAS: Hanya baca teks JSON dari Database. 
-    Tidak ada lagi proses baca file .jpg satu per satu saat server menyala!
-    """
     global known_face_encodings, known_face_names
     known_face_encodings.clear()
     known_face_names.clear()
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT nama, encoding FROM users WHERE encoding IS NOT NULL")
     for row in cursor.fetchall():
         nama = row[0]
         encoding_str = row[1]
         try:
-            # Ubah teks JSON kembali menjadi bentuk Array yang dipahami AI
             encoding_array = np.array(json.loads(encoding_str))
             known_face_encodings.append(encoding_array)
             known_face_names.append(nama)
-        except Exception as e:
-            print(f"[ERROR] Gagal memuat data wajah {nama} dari database.")
-            
+        except: pass
     conn.close()
 
 def muat_absensi_hari_ini():
@@ -140,8 +122,7 @@ def muat_absensi_hari_ini():
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT nama, waktu FROM attendance WHERE tanggal=?", (tanggal_terakhir_absen.strftime("%Y-%m-%d"),))
-        for row in cursor.fetchall():
-            wajah_sudah_absen[row[0]] = row[1]
+        for row in cursor.fetchall(): wajah_sudah_absen[row[0]] = row[1]
         conn.close()
     except: pass
 
@@ -164,6 +145,28 @@ def mouth_aspect_ratio(top_lip, bottom_lip):
     h_avg = (h1 + h2 + h3) / 3.0
     return h_avg / w if w != 0 else 0
 
+def detect_head_pose(face_landmarks):
+    try:
+        chin = face_landmarks.get('chin')
+        nose = face_landmarks.get('nose_bridge')
+        if not chin or not nose: return "TENGAH"
+        
+        left_point = chin[0]
+        right_point = chin[-1]
+        nose_point = nose[-1] 
+        
+        dist_left = hitung_jarak(left_point, nose_point)
+        dist_right = hitung_jarak(right_point, nose_point)
+        
+        if dist_right == 0: return "TENGAH"
+        ratio = dist_left / dist_right
+        
+        # DIPERKETAT: Pengguna harus benar-benar menoleh jauh
+        if ratio < 0.50: return "KANAN"
+        elif ratio > 2.00: return "KIRI"
+        return "TENGAH"
+    except: return "TENGAH"
+
 def catat_kehadiran_db(nama):
     try:
         now = datetime.now()
@@ -183,116 +186,200 @@ def catat_kehadiran_db(nama):
     except: return None, None
 
 # ==========================================
-# WORKER KAMERA BACKGROUND 
+# WORKER KAMERA BACKGROUND (ULTRA-STRICT KYC & GPU OPTIMIZED)
 # ==========================================
 def camera_worker():
-    global output_frame, raw_frame_for_register, wajah_sudah_absen, tanggal_terakhir_absen, latest_scan_event
+    global output_frame, wajah_sudah_absen, tanggal_terakhir_absen, latest_scan_event
+    global registration_request, registration_response
+    
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    frame_counter = 0
+    cached_face_locations = []
+    cached_colors = []
+    cached_display_texts = []
+    
     process_this_frame = True
-    face_locations, face_encodings, face_landmarks_list = [], [], []
     active_challenges = {}
+    available_actions = ["KEDIPKAN MATA", "BUKA MULUT", "TOLEH KIRI", "TOLEH KANAN"]
 
     while True:
         try:
             success, frame = cap.read()
             if not success or frame is None:
-                time.sleep(0.1)
+                time.sleep(0.05)
                 continue
+            frame = cv2.flip(frame, 1)
 
             raw_frame = frame.copy()
+            frame_counter += 1
+            
+            if registration_request is not None:
+                name_to_register = registration_request
+                try:
+                    rgb_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
+                    # Gunakan CNN GPU untuk registrasi agar super akurat
+                    locs = face_recognition.face_locations(rgb_frame, model="cnn")
+                    if len(locs) == 0:
+                        registration_response = {"status": "error", "message": "Wajah tidak terdeteksi! Ulangi foto."}
+                    else:
+                        new_encoding = face_recognition.face_encodings(rgb_frame, locs)[0]
+                        encoding_json = json.dumps(new_encoding.tolist())
+                        filepath = os.path.join(DATASET_DIR, f"{name_to_register}.jpg")
+                        cv2.imwrite(filepath, raw_frame)
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("INSERT INTO users (nama, encoding) VALUES (?, ?)", (name_to_register, encoding_json))
+                        conn.commit()
+                        conn.close()
+                        known_face_encodings.append(new_encoding)
+                        known_face_names.append(name_to_register)
+                        registration_response = {"status": "success", "message": f"Wajah '{name_to_register}' berhasil didaftarkan!"}
+                except Exception as e:
+                    registration_response = {"status": "error", "message": f"Error Sistem AI: {str(e)}"}
+                
+                registration_request = None 
+                continue 
+
             tgl_sekarang = datetime.now().date()
             if tgl_sekarang > tanggal_terakhir_absen:
                 wajah_sudah_absen.clear()
                 tanggal_terakhir_absen = tgl_sekarang
 
-            if process_this_frame:
+            # OPTIMASI GPU: AI berpikir setiap 2 frame saja (15 FPS AI)
+            if frame_counter % 2 == 0:
                 small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
                 rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-                with ai_lock:
-                    face_locations = face_recognition.face_locations(rgb_small_frame)
-                    if len(face_locations) > 0:
-                        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
-                        try: face_landmarks_list = face_recognition.face_landmarks(rgb_small_frame, face_locations)
-                        except: face_landmarks_list = [{}] * len(face_locations)
-                    else:
-                        face_encodings, face_landmarks_list = [], []
-            process_this_frame = not process_this_frame
+                
+                # Gunakan CNN GPU untuk deteksi real-time
+                face_locations = face_recognition.face_locations(rgb_small_frame, model="cnn")
+                if len(face_locations) > 0:
+                    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+                    try: face_landmarks_list = face_recognition.face_landmarks(rgb_small_frame, face_locations)
+                    except: face_landmarks_list = [{}] * len(face_locations)
+                else:
+                    face_encodings, face_landmarks_list = [], []
 
-            for (top, right, bottom, left), face_encoding, face_landmarks in zip(face_locations, face_encodings, face_landmarks_list):
-                top *= 4; right *= 4; bottom *= 4; left *= 4
-                name = "Unknown"
-                color = (0, 0, 255)
-                display_text = "Wajah Tidak Dikenali"
+                cached_face_locations = face_locations
+                cached_colors = []
+                cached_display_texts = []
 
-                ear, mar = 1.0, 0.0
+                for (top, right, bottom, left), face_encoding, face_landmarks in zip(face_locations, face_encodings, face_landmarks_list):
+                    name = "Unknown"
+                    color = (0, 0, 255)
+                    display_text = "Wajah Tidak Dikenali"
 
-                if 'left_eye' in face_landmarks and 'right_eye' in face_landmarks:
-                    ear = (eye_aspect_ratio(face_landmarks['left_eye']) + eye_aspect_ratio(face_landmarks['right_eye'])) / 2.0
-                if 'top_lip' in face_landmarks and 'bottom_lip' in face_landmarks:
-                    mar = mouth_aspect_ratio(face_landmarks['top_lip'], face_landmarks['bottom_lip'])
+                    ear, mar = 1.0, 0.0
+                    pose = "TENGAH"
 
-                if known_face_encodings:
-                    face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-                    if len(face_distances) > 0:
-                        best_match_index = np.argmin(face_distances)
-                        
-                        if face_distances[best_match_index] < FACE_MATCH_TOLERANCE:
-                            name = known_face_names[best_match_index]
+                    if 'left_eye' in face_landmarks and 'right_eye' in face_landmarks:
+                        ear = (eye_aspect_ratio(face_landmarks['left_eye']) + eye_aspect_ratio(face_landmarks['right_eye'])) / 2.0
+                    if 'top_lip' in face_landmarks and 'bottom_lip' in face_landmarks:
+                        mar = mouth_aspect_ratio(face_landmarks['top_lip'], face_landmarks['bottom_lip'])
+                    
+                    pose = detect_head_pose(face_landmarks)
+
+                    if known_face_encodings:
+                        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                        if len(face_distances) > 0:
+                            best_match_index = np.argmin(face_distances)
                             
-                            if name in wajah_sudah_absen:
-                                color, display_text = (255, 255, 0), f"{name} (Selesai)"
-                                if name in active_challenges: del active_challenges[name]
-                            else:
-                                if name not in active_challenges:
-                                    active_challenges[name] = {
-                                        "aksi": random.choice(["KEDIPKAN MATA", "BUKA MULUT"]),
-                                        "sukses_frames": 0,
-                                        "tutup_sebelumnya": False
-                                    }
+                            if face_distances[best_match_index] < FACE_MATCH_TOLERANCE:
+                                name = known_face_names[best_match_index]
                                 
-                                tantangan = active_challenges[name]["aksi"]
-                                color = (0, 255, 255) 
-                                display_text = f"{name} | {tantangan}!"
-                                liveness_passed = False
-
-                                if tantangan == "KEDIPKAN MATA":
-                                    if ear < EAR_THRESHOLD:
-                                        active_challenges[name]["sukses_frames"] += 1
+                                if name in wajah_sudah_absen:
+                                    color, display_text = (255, 255, 0), f"{name} (Selesai)"
+                                    if name in active_challenges: del active_challenges[name]
+                                else:
+                                    if name not in active_challenges:
+                                        sequence = random.sample(available_actions, 3) 
+                                        active_challenges[name] = {
+                                            "sequence": sequence,
+                                            "current_step": 0,
+                                            "sukses_frames": 0,
+                                            "tutup_sebelumnya": False,
+                                            "cooldown": 0 
+                                        }
+                                    
+                                    challenge_data = active_challenges[name]
+                                    curr_step_idx = challenge_data["current_step"]
+                                    total_steps = len(challenge_data["sequence"])
+                                    
+                                    if challenge_data["cooldown"] > 0:
+                                        challenge_data["cooldown"] -= 1
+                                        color = (0, 255, 0)
+                                        display_text = f"{name} | Lanjut..."
                                     else:
-                                        if active_challenges[name]["sukses_frames"] >= 2:
-                                            active_challenges[name]["tutup_sebelumnya"] = True
-                                        active_challenges[name]["sukses_frames"] = 0
-                                        
-                                    if active_challenges[name]["tutup_sebelumnya"] and ear >= EAR_THRESHOLD:
-                                        liveness_passed = True
+                                        tantangan = challenge_data["sequence"][curr_step_idx]
+                                        color = (0, 255, 255) 
+                                        display_text = f"{name} | {curr_step_idx + 1}/{total_steps}: {tantangan}!"
+                                        step_passed = False
 
-                                elif tantangan == "BUKA MULUT":
-                                    if mar > MAR_THRESHOLD:
-                                        active_challenges[name]["sukses_frames"] += 1
-                                        if active_challenges[name]["sukses_frames"] >= 3:
-                                            liveness_passed = True
-                                    else:
-                                        active_challenges[name]["sukses_frames"] = 0
+                                        # Limit frame sedikit dikurangi karena diproses tiap kelipatan 2 frame
+                                        if tantangan == "KEDIPKAN MATA":
+                                            if ear < EAR_THRESHOLD: 
+                                                challenge_data["sukses_frames"] += 1
+                                                if challenge_data["sukses_frames"] >= 2: 
+                                                    challenge_data["tutup_sebelumnya"] = True
+                                            else:
+                                                if challenge_data["tutup_sebelumnya"] and ear > EAR_THRESHOLD + 0.02: 
+                                                    step_passed = True
+                                                challenge_data["sukses_frames"] = 0
 
-                                if liveness_passed:
-                                    color, display_text = (0, 255, 0), f"{name} Diverifikasi"
-                                    jam_masuk, status = catat_kehadiran_db(name)
-                                    if jam_masuk: 
-                                        wajah_sudah_absen[name] = jam_masuk
-                                        ucapkan_pesan(f"Presensi {name}, direkam.")
-                                        with frame_lock:
-                                            latest_scan_event = {"nama": name, "waktu": jam_masuk, "status": status, "timestamp": time.time()}
-                                    del active_challenges[name]
+                                        elif tantangan == "BUKA MULUT":
+                                            if mar > MAR_THRESHOLD:
+                                                challenge_data["sukses_frames"] += 1
+                                                if challenge_data["sukses_frames"] >= 3: 
+                                                    step_passed = True
+                                            else: challenge_data["sukses_frames"] = 0
+                                            
+                                        elif tantangan == "TOLEH KANAN":
+                                            if pose == "KANAN":
+                                                challenge_data["sukses_frames"] += 1
+                                                if challenge_data["sukses_frames"] >= 3: 
+                                                    step_passed = True
+                                            else: challenge_data["sukses_frames"] = 0
+                                            
+                                        elif tantangan == "TOLEH KIRI":
+                                            if pose == "KIRI":
+                                                challenge_data["sukses_frames"] += 1
+                                                if challenge_data["sukses_frames"] >= 3: 
+                                                    step_passed = True
+                                            else: challenge_data["sukses_frames"] = 0
 
-                cv2.rectangle(frame, (left, top), (right, bottom), color, 3)
-                cv2.rectangle(frame, (left, bottom), (right, bottom + 40), color, cv2.FILLED)
-                cv2.putText(frame, display_text, (left + 8, bottom + 26), cv2.FONT_HERSHEY_DUPLEX, 0.60, (0, 0, 0) if color == (0, 255, 255) else (255, 255, 255), 1)
+                                        if step_passed:
+                                            challenge_data["current_step"] += 1
+                                            challenge_data["sukses_frames"] = 0
+                                            challenge_data["tutup_sebelumnya"] = False
+                                            challenge_data["cooldown"] = 10 # Jeda ~0.5 detik
+                                            ucapkan_pesan("Bagus")
+                                            
+                                            if challenge_data["current_step"] >= total_steps:
+                                                color, display_text = (0, 255, 0), f"{name} Diverifikasi"
+                                                jam_masuk, status = catat_kehadiran_db(name)
+                                                if jam_masuk: 
+                                                    wajah_sudah_absen[name] = jam_masuk
+                                                    ucapkan_pesan(f"Presensi {name}, direkam.")
+                                                    with frame_lock:
+                                                        latest_scan_event = {"nama": name, "waktu": jam_masuk, "status": status, "timestamp": time.time()}
+                                                del active_challenges[name]
+                    
+                    cached_colors.append(color)
+                    cached_display_texts.append(display_text)
+
+            # GAMBAR KOTAK MENGGUNAKAN SKALA HD (Dari Cache)
+            for (top, right, bottom, left), color, display_text in zip(cached_face_locations, cached_colors, cached_display_texts):
+                top *= 4; right *= 4; bottom *= 4; left *= 4
+                cv2.rectangle(frame, (left, top), (right, bottom), color, 4)
+                cv2.rectangle(frame, (left, bottom), (right, bottom + 50), color, cv2.FILLED)
+                cv2.putText(frame, display_text, (left + 10, bottom + 32), cv2.FONT_HERSHEY_DUPLEX, 0.85, (0, 0, 0) if color == (0, 255, 255) else (255, 255, 255), 2)
 
             with frame_lock:
                 output_frame = frame.copy()
-                raw_frame_for_register = raw_frame.copy()
-            time.sleep(0.01)
-        except: time.sleep(0.5)
+            # Hapus timer sleep agar video tetap mulus 30 FPS
+        except: time.sleep(0.1)
 
 t = threading.Thread(target=camera_worker, daemon=True)
 t.start()
@@ -309,7 +396,7 @@ def generate_web_stream():
         if frame_copy is None:
             time.sleep(0.05)
             continue
-        ret, buffer = cv2.imencode('.jpg', frame_copy)
+        ret, buffer = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ret: continue
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         time.sleep(0.03)
@@ -439,51 +526,34 @@ def current_frame():
 @app.route('/register_face', methods=['POST'])
 @login_required
 def register_face():
-    global raw_frame_for_register, known_face_encodings, known_face_names
+    global registration_request, registration_response
     name = request.form.get('name')
-    
-    with frame_lock:
-        if raw_frame_for_register is None: return jsonify({"status": "error", "message": "Kamera sedang memuat, coba sebentar lagi!"})
-        frame_to_save = raw_frame_for_register.copy()
-        
     if not name: return jsonify({"status": "error", "message": "Nama tidak boleh kosong!"})
     
     try:
-        # OPTIMASI SKALABILITAS: Hitung encoding dan ubah ke JSON sebelum menyimpan ke DB
-        rgb_frame = cv2.cvtColor(frame_to_save, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
-        
-        if len(face_locations) == 0:
-            return jsonify({"status": "error", "message": "Wajah tidak terdeteksi! Ulangi pengambilan foto."})
-            
-        new_encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
-        
-        encoding_json = json.dumps(new_encoding.tolist())
-        
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE nama=?", (name,))
         if cursor.fetchone():
             conn.close()
             return jsonify({"status": "error", "message": f"Wajah atas nama '{name}' sudah ada!"})
-            
-        # Simpan file JPG (hanya untuk ditampilkan di UI dashboard)
-        filepath = os.path.join(DATASET_DIR, f"{name}.jpg")
-        cv2.imwrite(filepath, frame_to_save)
-        
-        # Simpan nama DAN otak AI (encoding JSON) ke SQLite
-        cursor.execute("INSERT INTO users (nama, encoding) VALUES (?, ?)", (name, encoding_json))
-        conn.commit()
         conn.close()
-            
-        # Update memori berjalan
-        known_face_encodings.append(new_encoding)
-        known_face_names.append(name)
-        
-        return jsonify({"status": "success", "message": f"Wajah '{name}' berhasil didaftarkan!"})
     except Exception as e:
-        print("[ERROR Registrasi]:", e)
-        return jsonify({"status": "error", "message": "Terjadi kesalahan internal server!"})
+        return jsonify({"status": "error", "message": "Error database!"})
+        
+    registration_response = None
+    registration_request = name
+    
+    timeout = 150 
+    while registration_response is None and timeout > 0:
+        time.sleep(0.1)
+        timeout -= 1
+        
+    if registration_response is None:
+        registration_request = None 
+        return jsonify({"status": "error", "message": "Kamera sedang sibuk, gagal memproses wajah!"})
+        
+    return jsonify(registration_response)
 
 @app.route('/delete_face', methods=['POST'])
 @login_required
