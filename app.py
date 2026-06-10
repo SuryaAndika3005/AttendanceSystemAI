@@ -1,66 +1,105 @@
-from flask import Flask, render_template, Response, jsonify, request, send_from_directory, session, redirect, url_for
+from flask import Flask, render_template, Response, jsonify, request, session, redirect, url_for, make_response, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
+from datetime import datetime, timedelta
 import cv2
 import face_recognition
 import numpy as np
-from datetime import datetime
 import os
 import threading
 import math
-import sqlite3
 import pyttsx3
 import time
 import queue
 import csv
 from io import StringIO
-from flask import make_response
 import random
 import json
 
 app = Flask(__name__)
-app.secret_key = 'vision_ai_kunci_rahasia_super_aman' 
+app.secret_key = 'vision_ai_kunci_rahasia_super_aman'
 
 # ==========================================
-# INISIALISASI DATABASE & FOLDER
+# KONFIGURASI DATABASE MODERN (RDBMS ORM)
 # ==========================================
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///attendance_modern.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
 DATASET_DIR = "dataset_wajah"
 if not os.path.exists(DATASET_DIR): os.makedirs(DATASET_DIR)
 
-def get_db_connection():
-    return sqlite3.connect('attendance.db', check_same_thread=False, timeout=15.0)
+# ==========================================
+# STRUKTUR TABEL (MODELS) 
+# ==========================================
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    nama = db.Column(db.String(100), unique=True, nullable=False)
+    waktu_daftar = db.Column(db.DateTime, default=datetime.utcnow)
+    encoding = db.Column(db.Text, nullable=True)
 
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT UNIQUE, waktu_daftar DATETIME DEFAULT CURRENT_TIMESTAMP, encoding TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT, tanggal TEXT, waktu TEXT, status TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password TEXT)''')
+class Attendance(db.Model):
+    __tablename__ = 'attendance'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    nama = db.Column(db.String(100), nullable=False)
+    tanggal = db.Column(db.String(20), nullable=False)
+    waktu = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(20), nullable=False)
+
+class Admin(db.Model):
+    __tablename__ = 'admins'
+    username = db.Column(db.String(50), primary_key=True)
+    password = db.Column(db.String(255), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default='hrd')
+
+class Setting(db.Model):
+    __tablename__ = 'settings'
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    value = db.Column(db.String(100), nullable=False)
+
+app_settings = {}
+
+def load_settings():
+    global app_settings
+    with app.app_context():
+        settings = Setting.query.all()
+        for s in settings: app_settings[s.key] = s.value
+
+with app.app_context():
+    db.create_all()
+    if not Admin.query.filter_by(username='admin').first():
+        db.session.add(Admin(username='admin', password=generate_password_hash('admin123'), role='superadmin'))
+    if not Admin.query.filter_by(username='hrd').first():
+        db.session.add(Admin(username='hrd', password=generate_password_hash('hrd123'), role='hrd'))
     
-    cursor.execute("SELECT * FROM admins WHERE username='admin'")
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO admins (username, password) VALUES ('admin', 'admin123')")
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session: return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
+    default_settings = {
+        'batas_waktu': '08:30:00',
+        'ear_threshold': '0.20',
+        'mar_threshold': '0.45',
+        'spoof_threshold': '50.0'
+    }
+    for k, v in default_settings.items():
+        if not Setting.query.filter_by(key=k).first():
+            db.session.add(Setting(key=k, value=v))
+    db.session.commit()
+    
+load_settings()
 
 # ==========================================
-# VARIABEL GLOBAL & STATE AI
+# VARIABEL GLOBAL STATISTIK (DASHBOARD & AI)
 # ==========================================
 known_face_encodings, known_face_names = [], []
 wajah_sudah_absen = {}
 tanggal_terakhir_absen = datetime.now().date()
-
 FACE_MATCH_TOLERANCE = 0.40
-EAR_THRESHOLD = 0.20 
-MAR_THRESHOLD = 0.45 # DIPERKETAT: Harus buka mulut lebih lebar
+
+# Variabel Pelacak Statistik Global
+total_scans = 0
+total_confidence = 0.0
+total_inference_time = 0.0
 
 output_frame = None          
 frame_lock = threading.Lock() 
@@ -68,7 +107,6 @@ latest_scan_event = {}
 
 registration_request = None
 registration_response = None
-
 audio_queue = queue.Queue()
 
 def audio_worker():
@@ -83,9 +121,7 @@ def audio_worker():
         while True:
             teks = audio_queue.get()
             if teks is None: break
-            try:
-                engine.say(teks)
-                engine.runAndWait()
+            try: engine.say(teks); engine.runAndWait()
             except: pass
             audio_queue.task_done()
     except: pass
@@ -93,115 +129,114 @@ def audio_worker():
 threading.Thread(target=audio_worker, daemon=True).start()
 def ucapkan_pesan(teks): audio_queue.put(teks)
 
-# ==========================================
-# FUNGSI LIVENESS DETECTION & UTILITAS
-# ==========================================
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session: return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def superadmin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session: return redirect(url_for('login'))
+        if session.get('role') != 'superadmin': 
+            return jsonify({"status": "error", "message": "Akses Ditolak!"}), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+def is_spoof_texture(frame_bgr, top, right, bottom, left):
+    h, w = frame_bgr.shape[:2]
+    t, b = max(0, top - 20), min(h, bottom + 20)
+    l, r = max(0, left - 20), min(w, right + 20)
+    face_roi = frame_bgr[t:b, l:r]
+    if face_roi.size == 0: return True
+    gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    threshold = float(app_settings.get('spoof_threshold', 50.0))
+    return laplacian_var < threshold
+
+def align_and_encode_face(rgb_frame, landmarks):
+    if 'left_eye' not in landmarks or 'right_eye' not in landmarks: return None
+    left_center = np.array(landmarks['left_eye']).mean(axis=0).astype(int)
+    right_center = np.array(landmarks['right_eye']).mean(axis=0).astype(int)
+    angle = np.degrees(np.arctan2(right_center[1] - left_center[1], right_center[0] - left_center[0]))
+    eyes_center = (int((left_center[0] + right_center[0]) / 2), int((left_center[1] + right_center[1]) / 2))
+    M = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
+    aligned_face = cv2.warpAffine(rgb_frame, M, (rgb_frame.shape[1], rgb_frame.shape[0]), flags=cv2.INTER_CUBIC)
+    aligned_locs = face_recognition.face_locations(aligned_face, model="cnn")
+    if aligned_locs: return face_recognition.face_encodings(aligned_face, aligned_locs)[0]
+    return None
+
 def load_registered_faces():
     global known_face_encodings, known_face_names
     known_face_encodings.clear()
     known_face_names.clear()
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT nama, encoding FROM users WHERE encoding IS NOT NULL")
-    for row in cursor.fetchall():
-        nama = row[0]
-        encoding_str = row[1]
-        try:
-            encoding_array = np.array(json.loads(encoding_str))
-            known_face_encodings.append(encoding_array)
-            known_face_names.append(nama)
-        except: pass
-    conn.close()
+    with app.app_context():
+        users = User.query.filter(User.encoding.isnot(None)).all()
+        for u in users:
+            try:
+                known_face_encodings.append(np.array(json.loads(u.encoding)))
+                known_face_names.append(u.nama)
+            except: pass
 
 def muat_absensi_hari_ini():
     global wajah_sudah_absen, tanggal_terakhir_absen
     wajah_sudah_absen.clear()
     tanggal_terakhir_absen = datetime.now().date()
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT nama, waktu FROM attendance WHERE tanggal=?", (tanggal_terakhir_absen.strftime("%Y-%m-%d"),))
-        for row in cursor.fetchall(): wajah_sudah_absen[row[0]] = row[1]
-        conn.close()
-    except: pass
+    with app.app_context():
+        logs = Attendance.query.filter_by(tanggal=tanggal_terakhir_absen.strftime("%Y-%m-%d")).all()
+        for log in logs: wajah_sudah_absen[log.nama] = log.waktu
 
 load_registered_faces()
 muat_absensi_hari_ini()
 
 def hitung_jarak(p1, p2): return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-
 def eye_aspect_ratio(eye):
-    A = hitung_jarak(eye[1], eye[5])
-    B = hitung_jarak(eye[2], eye[4])
-    C = hitung_jarak(eye[0], eye[3])
+    A, B, C = hitung_jarak(eye[1], eye[5]), hitung_jarak(eye[2], eye[4]), hitung_jarak(eye[0], eye[3])
     return (A + B) / (2.0 * C) if C != 0 else 0
-
 def mouth_aspect_ratio(top_lip, bottom_lip):
     w = hitung_jarak(top_lip[0], top_lip[6])
-    h1 = hitung_jarak(top_lip[2], bottom_lip[4])
-    h2 = hitung_jarak(top_lip[3], bottom_lip[3])
-    h3 = hitung_jarak(top_lip[4], bottom_lip[2])
-    h_avg = (h1 + h2 + h3) / 3.0
+    h_avg = (hitung_jarak(top_lip[2], bottom_lip[4]) + hitung_jarak(top_lip[3], bottom_lip[3]) + hitung_jarak(top_lip[4], bottom_lip[2])) / 3.0
     return h_avg / w if w != 0 else 0
-
 def detect_head_pose(face_landmarks):
     try:
-        chin = face_landmarks.get('chin')
-        nose = face_landmarks.get('nose_bridge')
+        chin, nose = face_landmarks.get('chin'), face_landmarks.get('nose_bridge')
         if not chin or not nose: return "TENGAH"
-        
-        left_point = chin[0]
-        right_point = chin[-1]
-        nose_point = nose[-1] 
-        
-        dist_left = hitung_jarak(left_point, nose_point)
-        dist_right = hitung_jarak(right_point, nose_point)
-        
-        if dist_right == 0: return "TENGAH"
-        ratio = dist_left / dist_right
-        
-        # DIPERKETAT: Pengguna harus benar-benar menoleh jauh
-        if ratio < 0.50: return "KANAN"
-        elif ratio > 2.00: return "KIRI"
+        ratio = hitung_jarak(chin[0], nose[-1]) / hitung_jarak(chin[-1], nose[-1])
+        if ratio < 0.75: return "KANAN"
+        elif ratio > 1.35: return "KIRI"
         return "TENGAH"
     except: return "TENGAH"
 
 def catat_kehadiran_db(nama):
     try:
-        now = datetime.now()
-        tanggal, jam = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM attendance WHERE nama=? AND tanggal=?", (nama, tanggal))
-        if cursor.fetchone():
-            conn.close()
-            return None, None
-        batas_waktu = datetime.strptime("08:30:00", "%H:%M:%S").time()
-        status = "Tepat Waktu" if now.time() <= batas_waktu else "Terlambat"
-        cursor.execute("INSERT INTO attendance (nama, tanggal, waktu, status) VALUES (?, ?, ?, ?)", (nama, tanggal, jam, status))
-        conn.commit()
-        conn.close()
-        return jam, status
+        with app.app_context():
+            now = datetime.now()
+            tanggal, jam = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
+            if Attendance.query.filter_by(nama=nama, tanggal=tanggal).first(): return None, None
+            
+            batas = app_settings.get('batas_waktu', '08:30:00')
+            batas_waktu = datetime.strptime(batas, "%H:%M:%S").time()
+            status = "Tepat Waktu" if now.time() <= batas_waktu else "Terlambat"
+            
+            new_log = Attendance(nama=nama, tanggal=tanggal, waktu=jam, status=status)
+            db.session.add(new_log)
+            db.session.commit()
+            return jam, status
     except: return None, None
 
-# ==========================================
-# WORKER KAMERA BACKGROUND (ULTRA-STRICT KYC & GPU OPTIMIZED)
-# ==========================================
 def camera_worker():
     global output_frame, wajah_sudah_absen, tanggal_terakhir_absen, latest_scan_event
     global registration_request, registration_response
+    global total_scans, total_confidence, total_inference_time
     
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
     frame_counter = 0
-    cached_face_locations = []
-    cached_colors = []
-    cached_display_texts = []
-    
-    process_this_frame = True
+    cached_face_locations, cached_colors, cached_display_texts, cached_metrics = [], [], [], []
     active_challenges = {}
     available_actions = ["KEDIPKAN MATA", "BUKA MULUT", "TOLEH KIRI", "TOLEH KANAN"]
 
@@ -209,8 +244,7 @@ def camera_worker():
         try:
             success, frame = cap.read()
             if not success or frame is None:
-                time.sleep(0.05)
-                continue
+                time.sleep(0.05); continue
             frame = cv2.flip(frame, 1)
 
             raw_frame = frame.copy()
@@ -220,26 +254,27 @@ def camera_worker():
                 name_to_register = registration_request
                 try:
                     rgb_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
-                    # Gunakan CNN GPU untuk registrasi agar super akurat
                     locs = face_recognition.face_locations(rgb_frame, model="cnn")
                     if len(locs) == 0:
-                        registration_response = {"status": "error", "message": "Wajah tidak terdeteksi! Ulangi foto."}
+                        registration_response = {"status": "error", "message": "Wajah tidak terdeteksi!"}
                     else:
-                        new_encoding = face_recognition.face_encodings(rgb_frame, locs)[0]
+                        landmarks = face_recognition.face_landmarks(rgb_frame, locs)[0]
+                        new_encoding = align_and_encode_face(rgb_frame, landmarks)
+                        if new_encoding is None: new_encoding = face_recognition.face_encodings(rgb_frame, locs)[0]
+                            
                         encoding_json = json.dumps(new_encoding.tolist())
                         filepath = os.path.join(DATASET_DIR, f"{name_to_register}.jpg")
                         cv2.imwrite(filepath, raw_frame)
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("INSERT INTO users (nama, encoding) VALUES (?, ?)", (name_to_register, encoding_json))
-                        conn.commit()
-                        conn.close()
+                        
+                        with app.app_context():
+                            new_user = User(nama=name_to_register, encoding=encoding_json)
+                            db.session.add(new_user)
+                            db.session.commit()
+                            
                         known_face_encodings.append(new_encoding)
                         known_face_names.append(name_to_register)
-                        registration_response = {"status": "success", "message": f"Wajah '{name_to_register}' berhasil didaftarkan!"}
-                except Exception as e:
-                    registration_response = {"status": "error", "message": f"Error Sistem AI: {str(e)}"}
-                
+                        registration_response = {"status": "success"}
+                except Exception as e: registration_response = {"status": "error", "message": str(e)}
                 registration_request = None 
                 continue 
 
@@ -248,268 +283,241 @@ def camera_worker():
                 wajah_sudah_absen.clear()
                 tanggal_terakhir_absen = tgl_sekarang
 
-            # OPTIMASI GPU: AI berpikir setiap 2 frame saja (15 FPS AI)
             if frame_counter % 2 == 0:
+                start_time = time.time() # Mulai Pencatatan Waktu Inferensi
+                
                 small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
                 rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-                
-                # Gunakan CNN GPU untuk deteksi real-time
                 face_locations = face_recognition.face_locations(rgb_small_frame, model="cnn")
                 if len(face_locations) > 0:
-                    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
                     try: face_landmarks_list = face_recognition.face_landmarks(rgb_small_frame, face_locations)
                     except: face_landmarks_list = [{}] * len(face_locations)
-                else:
-                    face_encodings, face_landmarks_list = [], []
+                else: face_landmarks_list = []
 
-                cached_face_locations = face_locations
-                cached_colors = []
-                cached_display_texts = []
+                inference_time_ms = round((time.time() - start_time) * 1000) # Kalkulasi Waktu Inferensi Akhir
+                
+                cached_face_locations, cached_colors, cached_display_texts, cached_metrics = face_locations, [], [], []
 
-                for (top, right, bottom, left), face_encoding, face_landmarks in zip(face_locations, face_encodings, face_landmarks_list):
-                    name = "Unknown"
-                    color = (0, 0, 255)
-                    display_text = "Wajah Tidak Dikenali"
-
-                    ear, mar = 1.0, 0.0
-                    pose = "TENGAH"
-
-                    if 'left_eye' in face_landmarks and 'right_eye' in face_landmarks:
-                        ear = (eye_aspect_ratio(face_landmarks['left_eye']) + eye_aspect_ratio(face_landmarks['right_eye'])) / 2.0
-                    if 'top_lip' in face_landmarks and 'bottom_lip' in face_landmarks:
-                        mar = mouth_aspect_ratio(face_landmarks['top_lip'], face_landmarks['bottom_lip'])
+                for (top, right, bottom, left), face_landmarks in zip(face_locations, face_landmarks_list):
+                    name, color, display_text = "Unknown", (0, 0, 255), "Wajah Tidak Dikenali"
+                    metric_text = f"Memproses AI: {inference_time_ms} ms" # Status Default
+                    confidence = 0.0
                     
-                    pose = detect_head_pose(face_landmarks)
+                    orig_top, orig_right, orig_bottom, orig_left = top*4, right*4, bottom*4, left*4
+                    if is_spoof_texture(raw_frame, orig_top, orig_right, orig_bottom, orig_left):
+                        color, display_text = (0, 0, 255), "SPOOF TERDETEKSI (Tekstur!)"
+                        if name in active_challenges: del active_challenges[name]
+                    else:
+                        face_encoding = align_and_encode_face(rgb_small_frame, face_landmarks)
+                        if face_encoding is None: face_encoding = face_recognition.face_encodings(rgb_small_frame, [(top, right, bottom, left)])[0]
 
-                    if known_face_encodings:
-                        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-                        if len(face_distances) > 0:
-                            best_match_index = np.argmin(face_distances)
-                            
-                            if face_distances[best_match_index] < FACE_MATCH_TOLERANCE:
-                                name = known_face_names[best_match_index]
+                        ear, mar, pose = 1.0, 0.0, "TENGAH"
+                        if 'left_eye' in face_landmarks and 'right_eye' in face_landmarks:
+                            ear = (eye_aspect_ratio(face_landmarks['left_eye']) + eye_aspect_ratio(face_landmarks['right_eye'])) / 2.0
+                        if 'top_lip' in face_landmarks and 'bottom_lip' in face_landmarks:
+                            mar = mouth_aspect_ratio(face_landmarks['top_lip'], face_landmarks['bottom_lip'])
+                        pose = detect_head_pose(face_landmarks)
+
+                        if known_face_encodings:
+                            face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                            if len(face_distances) > 0:
+                                best_match_idx = np.argmin(face_distances)
+                                dist = face_distances[best_match_idx]
                                 
-                                if name in wajah_sudah_absen:
-                                    color, display_text = (255, 255, 0), f"{name} (Selesai)"
-                                    if name in active_challenges: del active_challenges[name]
-                                else:
-                                    if name not in active_challenges:
-                                        sequence = random.sample(available_actions, 3) 
-                                        active_challenges[name] = {
-                                            "sequence": sequence,
-                                            "current_step": 0,
-                                            "sukses_frames": 0,
-                                            "tutup_sebelumnya": False,
-                                            "cooldown": 0 
-                                        }
+                                if dist < FACE_MATCH_TOLERANCE:
+                                    name = known_face_names[best_match_idx]
+                                    confidence = round((1.0 - dist) * 100, 1) # Kalkulasi Confidence Score (0-100%)
+                                    metric_text = f"Kecocokan: {confidence}% | Inferensi: {inference_time_ms} ms"
                                     
-                                    challenge_data = active_challenges[name]
-                                    curr_step_idx = challenge_data["current_step"]
-                                    total_steps = len(challenge_data["sequence"])
+                                    # Akumulasi Data untuk Dashboard Statistik
+                                    total_scans += 1
+                                    total_confidence += confidence
+                                    total_inference_time += inference_time_ms
                                     
-                                    if challenge_data["cooldown"] > 0:
-                                        challenge_data["cooldown"] -= 1
-                                        color = (0, 255, 0)
-                                        display_text = f"{name} | Lanjut..."
+                                    if name in wajah_sudah_absen:
+                                        color, display_text = (255, 255, 0), f"{name} (Selesai)"
+                                        if name in active_challenges: del active_challenges[name]
                                     else:
-                                        tantangan = challenge_data["sequence"][curr_step_idx]
-                                        color = (0, 255, 255) 
-                                        display_text = f"{name} | {curr_step_idx + 1}/{total_steps}: {tantangan}!"
-                                        step_passed = False
-
-                                        # Limit frame sedikit dikurangi karena diproses tiap kelipatan 2 frame
-                                        if tantangan == "KEDIPKAN MATA":
-                                            if ear < EAR_THRESHOLD: 
-                                                challenge_data["sukses_frames"] += 1
-                                                if challenge_data["sukses_frames"] >= 2: 
-                                                    challenge_data["tutup_sebelumnya"] = True
-                                            else:
-                                                if challenge_data["tutup_sebelumnya"] and ear > EAR_THRESHOLD + 0.02: 
-                                                    step_passed = True
-                                                challenge_data["sukses_frames"] = 0
-
-                                        elif tantangan == "BUKA MULUT":
-                                            if mar > MAR_THRESHOLD:
-                                                challenge_data["sukses_frames"] += 1
-                                                if challenge_data["sukses_frames"] >= 3: 
-                                                    step_passed = True
-                                            else: challenge_data["sukses_frames"] = 0
+                                        if name not in active_challenges:
+                                            active_challenges[name] = {"sequence": random.sample(available_actions, 3), "current_step": 0, "sukses_frames": 0, "tutup_sebelumnya": False, "cooldown": 0 }
+                                        
+                                        ch = active_challenges[name]
+                                        step = ch["current_step"]
+                                        
+                                        if ch["cooldown"] > 0:
+                                            ch["cooldown"] -= 1
+                                            color, display_text = (0, 255, 0), f"{name} | Lanjut..."
+                                        else:
+                                            tantangan = ch["sequence"][step]
+                                            color, display_text = (0, 255, 255), f"{name} | {step + 1}/3: {tantangan}!"
+                                            passed = False
                                             
-                                        elif tantangan == "TOLEH KANAN":
-                                            if pose == "KANAN":
-                                                challenge_data["sukses_frames"] += 1
-                                                if challenge_data["sukses_frames"] >= 3: 
-                                                    step_passed = True
-                                            else: challenge_data["sukses_frames"] = 0
-                                            
-                                        elif tantangan == "TOLEH KIRI":
-                                            if pose == "KIRI":
-                                                challenge_data["sukses_frames"] += 1
-                                                if challenge_data["sukses_frames"] >= 3: 
-                                                    step_passed = True
-                                            else: challenge_data["sukses_frames"] = 0
+                                            ear_thresh = float(app_settings.get('ear_threshold', 0.20))
+                                            mar_thresh = float(app_settings.get('mar_threshold', 0.45))
 
-                                        if step_passed:
-                                            challenge_data["current_step"] += 1
-                                            challenge_data["sukses_frames"] = 0
-                                            challenge_data["tutup_sebelumnya"] = False
-                                            challenge_data["cooldown"] = 10 # Jeda ~0.5 detik
-                                            ucapkan_pesan("Bagus")
-                                            
-                                            if challenge_data["current_step"] >= total_steps:
-                                                color, display_text = (0, 255, 0), f"{name} Diverifikasi"
-                                                jam_masuk, status = catat_kehadiran_db(name)
-                                                if jam_masuk: 
-                                                    wajah_sudah_absen[name] = jam_masuk
-                                                    ucapkan_pesan(f"Presensi {name}, direkam.")
-                                                    with frame_lock:
-                                                        latest_scan_event = {"nama": name, "waktu": jam_masuk, "status": status, "timestamp": time.time()}
-                                                del active_challenges[name]
+                                            if tantangan == "KEDIPKAN MATA":
+                                                if ear < ear_thresh: ch["sukses_frames"] += 1; ch["tutup_sebelumnya"] = ch["sukses_frames"] >= 2
+                                                elif ch["tutup_sebelumnya"] and ear > ear_thresh + 0.02: passed = True; ch["sukses_frames"] = 0
+                                            elif tantangan == "BUKA MULUT" and mar > mar_thresh:
+                                                ch["sukses_frames"] += 1; passed = ch["sukses_frames"] >= 3
+                                            elif tantangan == "TOLEH KANAN" and pose == "KANAN":
+                                                ch["sukses_frames"] += 1; passed = ch["sukses_frames"] >= 2
+                                            elif tantangan == "TOLEH KIRI" and pose == "KIRI":
+                                                ch["sukses_frames"] += 1; passed = ch["sukses_frames"] >= 2
+
+                                            if passed:
+                                                ch["current_step"] += 1
+                                                ch["sukses_frames"], ch["tutup_sebelumnya"], ch["cooldown"] = 0, False, 10
+                                                ucapkan_pesan("Bagus")
+                                                
+                                                if ch["current_step"] >= len(ch["sequence"]):
+                                                    color, display_text = (0, 255, 0), f"{name} Diverifikasi"
+                                                    jam_masuk, status = catat_kehadiran_db(name)
+                                                    if jam_masuk: 
+                                                        wajah_sudah_absen[name] = jam_masuk
+                                                        ucapkan_pesan(f"Presensi {name}, direkam.")
+                                                        with frame_lock:
+                                                            latest_scan_event = {"nama": name, "waktu": jam_masuk, "status": status, "timestamp": time.time()}
+                                                    del active_challenges[name]
                     
                     cached_colors.append(color)
                     cached_display_texts.append(display_text)
+                    cached_metrics.append(metric_text)
 
-            # GAMBAR KOTAK MENGGUNAKAN SKALA HD (Dari Cache)
-            for (top, right, bottom, left), color, display_text in zip(cached_face_locations, cached_colors, cached_display_texts):
+            for (top, right, bottom, left), color, display_text, metric in zip(cached_face_locations, cached_colors, cached_display_texts, cached_metrics):
                 top *= 4; right *= 4; bottom *= 4; left *= 4
                 cv2.rectangle(frame, (left, top), (right, bottom), color, 4)
-                cv2.rectangle(frame, (left, bottom), (right, bottom + 50), color, cv2.FILLED)
-                cv2.putText(frame, display_text, (left + 10, bottom + 32), cv2.FONT_HERSHEY_DUPLEX, 0.85, (0, 0, 0) if color == (0, 255, 255) else (255, 255, 255), 2)
+                cv2.rectangle(frame, (left, bottom), (right, bottom + 75), color, cv2.FILLED)
+                cv2.putText(frame, display_text, (left + 10, bottom + 30), cv2.FONT_HERSHEY_DUPLEX, 0.85, (0, 0, 0) if color == (0, 255, 255) else (255, 255, 255), 2)
+                cv2.putText(frame, metric, (left + 10, bottom + 60), cv2.FONT_HERSHEY_DUPLEX, 0.65, (0, 0, 0) if color == (0, 255, 255) else (220, 220, 220), 1)
 
-            with frame_lock:
-                output_frame = frame.copy()
-            # Hapus timer sleep agar video tetap mulus 30 FPS
+            with frame_lock: output_frame = frame.copy()
         except: time.sleep(0.1)
 
 t = threading.Thread(target=camera_worker, daemon=True)
 t.start()
 
-# ==========================================
-# FLASK ROUTES
-# ==========================================
 def generate_web_stream():
     global output_frame
     while True:
         frame_copy = None
         with frame_lock:
             if output_frame is not None: frame_copy = output_frame.copy()
-        if frame_copy is None:
-            time.sleep(0.05)
-            continue
+        if frame_copy is None: time.sleep(0.05); continue
         ret, buffer = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ret: continue
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         time.sleep(0.03)
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM admins WHERE username=? AND password=?", (username, password))
-        admin = cursor.fetchone()
-        conn.close()
-        
-        if admin:
+        admin = Admin.query.filter_by(username=request.form.get('username')).first()
+        if admin and check_password_hash(admin.password, request.form.get('password')):
             session['logged_in'] = True
-            session['username'] = username
-            return jsonify({"status": "success", "message": "Login berhasil!"})
-        else:
-            return jsonify({"status": "error", "message": "Username atau Password salah!"})
+            session['username'] = admin.username
+            session['role'] = admin.role
+            return jsonify({"status": "success"})
+        return jsonify({"status": "error", "message": "Kredensial salah!"})
     return render_template('login.html')
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
-    session.pop('username', None)
-    return redirect(url_for('login'))
+    session.clear(); return redirect(url_for('login'))
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    logs = Attendance.query.order_by(Attendance.id.desc()).all()
+    users = User.query.order_by(User.id.desc()).all()
+    tgl_hari_ini = datetime.now().strftime("%Y-%m-%d")
+    hadir = Attendance.query.filter_by(tanggal=tgl_hari_ini).count()
+    tepat = Attendance.query.filter_by(tanggal=tgl_hari_ini, status='Tepat Waktu').count()
+    telat = Attendance.query.filter_by(tanggal=tgl_hari_ini, status='Terlambat').count()
+    data_render = [(l.id, l.nama, l.tanggal, l.waktu, l.status) for l in logs]
+    
+    employee_status = []
+    for u in users:
+        if u.nama in wajah_sudah_absen: employee_status.append({"nama": u.nama, "status": "Hadir", "waktu": wajah_sudah_absen[u.nama]})
+        else: employee_status.append({"nama": u.nama, "status": "Belum Hadir", "waktu": "-"})
+        
+    users_render = [(u.nama, u.waktu_daftar) for u in users]
+    
+    # Kalkulasi Metrik Global untuk Dasbor
+    avg_acc = f"{(total_confidence / total_scans):.1f}%" if total_scans > 0 else "0.0%"
+    avg_time = f"{(total_inference_time / total_scans):.0f} ms" if total_scans > 0 else "0 ms"
+    
+    return render_template('dashboard.html', data=data_render, users=users_render, hadir=hadir, tepat=tepat, telat=telat, employees=employee_status, settings=app_settings, avg_acc=avg_acc, avg_time=avg_time)
+
+@app.route('/api/chart_data')
+@login_required
+def chart_data():
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+    hadir_per_day = [Attendance.query.filter_by(tanggal=d).count() for d in dates]
+    tgl_hari_ini = datetime.now().strftime("%Y-%m-%d")
+    tepat = Attendance.query.filter_by(tanggal=tgl_hari_ini, status='Tepat Waktu').count()
+    telat = Attendance.query.filter_by(tanggal=tgl_hari_ini, status='Terlambat').count()
+    total_users = User.query.count()
+    belum_hadir = total_users - (tepat + telat)
+    if belum_hadir < 0: belum_hadir = 0
+
+    return jsonify({
+        "bar_labels": dates,
+        "bar_data": hadir_per_day,
+        "pie_data": [tepat, telat, belum_hadir]
+    })
+
+@app.route('/update_settings', methods=['POST'])
+@superadmin_required
+def update_settings():
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT nama, tanggal, waktu, status FROM attendance ORDER BY id DESC")
-        data = cursor.fetchall()
-        cursor.execute("SELECT nama, waktu_daftar FROM users ORDER BY id DESC")
-        users = cursor.fetchall()
-        conn.close()
-        
-        tgl_hari_ini = datetime.now().strftime("%Y-%m-%d")
-        hadir_hari_ini = sum(1 for row in data if row[1] == tgl_hari_ini)
-        tepat_waktu = sum(1 for row in data if row[1] == tgl_hari_ini and row[3] == 'Tepat Waktu')
-        terlambat = sum(1 for row in data if row[1] == tgl_hari_ini and row[3] == 'Terlambat')
-        
-        employee_status = []
-        for u in users:
-            nama = u[0]
-            if nama in wajah_sudah_absen:
-                employee_status.append({"nama": nama, "status": "Hadir", "waktu": wajah_sudah_absen[nama]})
-            else:
-                employee_status.append({"nama": nama, "status": "Belum Hadir", "waktu": "-"})
-        
-        return render_template('dashboard.html', data=data[:10], users=users, hadir=hadir_hari_ini, tepat=tepat_waktu, telat=terlambat, employees=employee_status)
+        keys = ['batas_waktu', 'ear_threshold', 'mar_threshold', 'spoof_threshold']
+        for k in keys:
+            val = request.form.get(k)
+            if val:
+                setting = Setting.query.filter_by(key=k).first()
+                if setting: setting.value = val
+        db.session.commit()
+        load_settings() 
+        return jsonify({"status": "success", "message": "Pengaturan berhasil diperbarui!"})
     except Exception as e:
-        return f"Terjadi kesalahan saat memuat dashboard: {e}"
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/export_csv')
 @login_required
 def export_csv():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, nama, tanggal, waktu, status FROM attendance ORDER BY id DESC")
-        data = cursor.fetchall()
-        conn.close()
-
-        si = StringIO()
-        cw = csv.writer(si)
-        cw.writerow(['ID', 'Nama Entitas', 'Tanggal', 'Jam Masuk', 'Status Kehadiran'])
-        cw.writerows(data)
-
-        output = make_response(si.getvalue())
-        nama_file = f"Laporan_Kehadiran_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        output.headers["Content-Disposition"] = f"attachment; filename={nama_file}"
-        output.headers["Content-type"] = "text/csv"
-        return output
-    except Exception as e:
-        return f"Gagal mengekspor data: {e}"
+    logs = Attendance.query.order_by(Attendance.id.desc()).all()
+    si = StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['ID', 'Nama Entitas', 'Tanggal', 'Jam Masuk', 'Status Kehadiran'])
+    for l in logs: cw.writerow([l.id, l.nama, l.tanggal, l.waktu, l.status])
+    output = make_response(si.getvalue())
+    output.headers["Content-Disposition"] = f"attachment; filename=Laporan_Kehadiran_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    output.headers["Content-type"] = "text/csv"
+    return output
 
 @app.route('/scanner')
-def scanner():
-    return render_template('scanner.html')
-
+def scanner(): return render_template('scanner.html')
 @app.route('/video_feed')
-def video_feed():
-    return Response(generate_web_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
+def video_feed(): return Response(generate_web_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/stream_attendance')
 def stream_attendance():
     def event_stream():
         last_sent_time = 0
         while True:
-            with frame_lock:
-                current_event = latest_scan_event.copy() if latest_scan_event else None
-            
+            with frame_lock: current_event = latest_scan_event.copy() if latest_scan_event else None
             if current_event and current_event.get("timestamp", 0) > last_sent_time:
                 last_sent_time = current_event["timestamp"]
                 yield f"data: {json.dumps(current_event)}\n\n"
-            
             time.sleep(0.5)
-
     return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/dataset/<path:filename>')
-@login_required
-def serve_dataset(filename):
-    return send_from_directory(DATASET_DIR, filename)
+def serve_dataset(filename): return send_from_directory(DATASET_DIR, filename)
 
 @app.route('/current_frame')
 @login_required
@@ -524,58 +532,40 @@ def current_frame():
     return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 @app.route('/register_face', methods=['POST'])
-@login_required
+@superadmin_required 
 def register_face():
     global registration_request, registration_response
     name = request.form.get('name')
     if not name: return jsonify({"status": "error", "message": "Nama tidak boleh kosong!"})
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE nama=?", (name,))
-        if cursor.fetchone():
-            conn.close()
-            return jsonify({"status": "error", "message": f"Wajah atas nama '{name}' sudah ada!"})
-        conn.close()
-    except Exception as e:
-        return jsonify({"status": "error", "message": "Error database!"})
+    if User.query.filter_by(nama=name).first(): return jsonify({"status": "error", "message": f"Wajah atas nama '{name}' sudah ada!"})
         
     registration_response = None
     registration_request = name
-    
     timeout = 150 
     while registration_response is None and timeout > 0:
-        time.sleep(0.1)
-        timeout -= 1
+        time.sleep(0.1); timeout -= 1
         
     if registration_response is None:
         registration_request = None 
-        return jsonify({"status": "error", "message": "Kamera sedang sibuk, gagal memproses wajah!"})
-        
+        return jsonify({"status": "error", "message": "Kamera sibuk, gagal memproses!"})
     return jsonify(registration_response)
 
 @app.route('/delete_face', methods=['POST'])
-@login_required
+@superadmin_required 
 def delete_face():
     global known_face_encodings, known_face_names
     name = request.form.get('name')
     filepath = os.path.join(DATASET_DIR, f"{name}.jpg")
     if os.path.exists(filepath): os.remove(filepath)
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM users WHERE nama=?", (name,))
-        conn.commit()
-        conn.close()
-        
-        if name in known_face_names:
-            idx = known_face_names.index(name)
-            known_face_names.pop(idx)
-            known_face_encodings.pop(idx)
-            
-        return jsonify({"status": "success", "message": f"Data '{name}' berhasil dihapus!"})
-    except: return jsonify({"status": "error", "message": "Gagal menghapus data dari database!"})
+    user = User.query.filter_by(nama=name).first()
+    if user:
+        db.session.delete(user)
+        db.session.commit()
+    if name in known_face_names:
+        idx = known_face_names.index(name)
+        known_face_names.pop(idx)
+        known_face_encodings.pop(idx)
+    return jsonify({"status": "success", "message": f"Data '{name}' berhasil dihapus!"})
 
 if __name__ == '__main__':
     app.run(debug=False, port=5000)
